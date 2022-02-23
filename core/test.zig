@@ -21,26 +21,21 @@ test "simple" {
             std.hash.autoHash(hasher, self.*);
         }
     };
-    var xs = std.MultiArrayList(esvc.Item(Payload)){};
-    defer xs.deinit(testing.allocator);
+    var xs = esvc.Esvc(FlowData, Payload){
+        .allocator = testing.allocator,
+        .ops = .{},
+    };
+    defer xs.deinit();
 
-    const ir0 = try esvc.insert(
-        FlowData,
-        Payload,
-        testing.allocator,
+    const ir0 = try xs.insert(
         .{ .inner = false },
-        &xs,
         .{ .invert = true },
         0,
         0,
     );
     try testing.expectEqual(@as(usize, 0), ir0);
-    const ir1 = try esvc.insert(
-        FlowData,
-        Payload,
-        testing.allocator,
+    const ir1 = try xs.insert(
         .{ .inner = true },
-        &xs,
         .{ .invert = true },
         0,
         0,

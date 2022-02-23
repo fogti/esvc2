@@ -140,248 +140,272 @@ fn determineInsertUpperBound(
     return ops.len;
 }
 
-/// This is the primary operation of this library.
-pub fn insert(
+/// this constructs the primary helper data structure, to avoid
+/// passing around `FlowData` and `Payload`.
+pub fn Esvc(
     // the data which gets mangled via the operations
     // expected methods:
     //   - deinit(self: *@This(), allocator: Allocator) void
-    //   - clone(self: *const @This(), allocator: Allocator) !void
+    //   - clone(self: *const @This(), allocator: Allocator) !@This()
     //   - eql(a: *const @This(), b: *const @This()) bool
     comptime FlowData: type,
 
     // the operation payload, describes how the operation is executed
     // expected methods:
+    //   - deinit(self: *@This(), allocator: Allocator) void
+    //   - clone(self: *const @This(), allocator: Allocator) !@This()
     //   - run(self: *@This(), allocator: Allocator, data: *FlowData) !void
     //   - hash(self: *@This(), hasher: anytype) void
     comptime Payload: type,
-    allocator: Allocator,
+) type {
+    return struct {
+        allocator: Allocator,
+        ops: Ops,
 
-    // this function doesn't take ownership of the value
-    // this is the value at offset.
-    initialValue: FlowData,
+        const Self = @This();
+        pub const Ops = std.MultiArrayList(Item(Payload));
 
-    // the existing operation chain
-    ops: *std.MultiArrayList(Item(Payload)),
-
-    // the operation which should be inserted
-    toAdd: Payload,
-
-    // when merging two operation chains,
-    // we want to be able to skip the leading common subsequence
-    offset: usize,
-
-    // when merging two operation chains,
-    // we want to make sure that the lower bound stays the same
-    expectLowerBound: ?usize,
-) !usize {
-    var opsSlice = ops.slice();
-    const lowerBound = offset + try determineInsertLowerBound(
-        FlowData,
-        Payload,
-        allocator,
-        initialValue,
-        opsSlice.items(.payload)[offset..],
-        toAdd,
-    );
-    if (expectLowerBound) |elb| {
-        if (lowerBound != elb) return error.LowerBoundMismatches;
-    }
-    const upperBound = determineInsertUpperBound(Payload, opsSlice, lowerBound, toAdd);
-    assert(lowerBound <= upperBound);
-    assert(upperBound <= ops.len);
-
-    // upperBound returns the index where we want to insert our element
-    try ops.insert(allocator, upperBound, .{
-        .dep = if (lowerBound == 0) 0 else @intCast(u32, 1 + upperBound - lowerBound),
-        .payload = toAdd,
-    });
-    opsSlice = ops.slice();
-
-    // fix `dep` indices in following items
-    for (opsSlice.items(.dep)[upperBound + 1 ..]) |*item, idx| {
-        const realIdx = upperBound + 1 + idx;
-        assert(ops.len > realIdx);
-        if (item.* > idx) item.* += 1;
-        assert(realIdx >= item.*);
-    }
-    return upperBound;
-}
-
-pub fn merge(
-    comptime FlowData: type,
-    comptime Payload: type,
-    allocator: Allocator,
-    initialValue: FlowData,
-    mainOps: *std.MultiArrayList(Item(Payload)),
-    toMergeOps: *const std.MultiArrayList(Item(Payload)),
-) !bool {
-    const clsOffset = blk: {
-        var offset: usize = 0;
-        const maxOffset = std.math.max(mainOps.len, toMergeOps.len);
-        // find largest common leading subsequence
-        while (offset < maxOffset) : (offset += 1) {
-            // for eql check, use hashing.
-            if (hashSingle(mainOps[offset]) != hashSingle(toMergeOps[offset]))
-                break;
+        pub fn deinit(self: *Self) void {
+            self.ops.deinit(self.allocator);
         }
-        break :blk offset;
-    };
 
-    if (clsOffset >= toMergeOps.len) return true;
+        pub fn insert(
+            self: *Self,
 
-    // calculate real offset (such that all deps still resolve)
-    const tmoSlice = toMergeOps.slice();
-    const tmoPayloads = tmoSlice.items(.payload);
-    const tmoDeps = tmoSlice.items(.dep);
-    const realClsOffset = blk: {
-        var offset = clsOffset;
-        for (tmoDeps[clsOffset..]) |dep, idx| {
-            const realDep = clsOffset + idx - dep;
-            if (offset > realDep)
-                offset = realDep;
+            // this function doesn't take ownership of the value
+            // the value is assumed to be at offset.
+            initialValue: FlowData,
+
+            // the operation which should be inserted
+            toAdd: Payload,
+
+            // when merging two operation chains,
+            // we want to be able to skip the leading common subsequence
+            offset: usize,
+
+            // when merging two operation chains,
+            // we want to make sure that the lower bound stays the same
+            expectLowerBound: ?usize,
+        ) !usize {
+            var opsSlice = self.ops.slice();
+            const lowerBound = offset + try determineInsertLowerBound(
+                FlowData,
+                Payload,
+                self.allocator,
+                initialValue,
+                opsSlice.items(.payload)[offset..],
+                toAdd,
+            );
+            if (expectLowerBound) |elb| {
+                if (lowerBound != elb) return error.LowerBoundMismatches;
+            }
+            const upperBound = determineInsertUpperBound(Payload, opsSlice, lowerBound, toAdd);
+            assert(lowerBound <= upperBound);
+            assert(upperBound <= self.ops.len);
+
+            // upperBound returns the index where we want to insert our element
+            try self.ops.insert(self.allocator, upperBound, .{
+                .dep = if (lowerBound == 0) 0 else @intCast(u32, 1 + upperBound - lowerBound),
+                .payload = toAdd,
+            });
+            opsSlice = self.ops.slice();
+
+            // fix `dep` indices in following items
+            for (opsSlice.items(.dep)[upperBound + 1 ..]) |*item, idx| {
+                const realIdx = upperBound + 1 + idx;
+                assert(opsSlice.len > realIdx);
+                if (item.* > idx) item.* += 1;
+                assert(realIdx >= item.*);
+            }
+            return upperBound;
         }
-        break :blk offset;
-    };
 
-    // calculate new initial value
-    const mainoSlice = mainOps.slice();
-    var initialValue2 = initialValue.clone(allocator);
-    defer initialValue2.deinit(allocator);
-    for (mainoSlice.items(.payload)[0..realClsOffset]) |item|
-        item.run(allocator, &initialValue2);
+        pub fn merge(
+            self: *Self,
+            initialValue: FlowData,
+            // this function does take ownership of toMergeOps
+            toMergeOps: Ops,
+        ) !bool {
+            defer {
+                for (toMergeOps.items(.payload)) |*pl| pl.deinit(self.allocator);
+                toMergeOps.deinit(self.allocator);
+            }
 
-    // check rest
-    var trList = std.ArrayList(usize).initCapacity(allocator, tmoSlice.len);
-    defer trList.deinit();
-    var itm = clsOffset;
-    var imo = clsOffset;
-    while (itm < tmoSlice.len) : (itm += 1) {
-        // translate lower bound
-        const nlb = if (tmoDeps[itm] == 0) imo else trList.items[itm - tmoDeps[itm]];
+            const tmoSlice = toMergeOps.slice();
+            var mainoSlice = self.ops.slice();
+            const clsOffset = blk: {
+                var offset: usize = 0;
+                const maxOffset = std.math.max(self.ops.len, toMergeOps.len);
+                const tmoPayloads = tmoSlice.items(.payload);
+                const mainPayloads = mainoSlice.items(.payload);
+                const tmoDeps = tmoSlice.items(.dep);
+                const mainDeps = mainoSlice.items(.dep);
+                // find largest common leading subsequence
+                while (offset < maxOffset) : (offset += 1) {
+                    // for eql check, use hashing.
+                    if (hashSingle(mainPayloads[offset]) != hashSingle(tmoPayloads[offset]))
+                        break;
+                    // if this fails, the data is corrupted
+                    if (tmoDeps[offset] != mainDeps[offset])
+                        unreachable;
+                }
+                break :blk offset;
+            };
 
-        // check if this item is already present in mainOps
-        const toAdd = tmoPayloads[itm];
-        const toAddHash = hashSingle(toAdd);
-        const newIdx: usize = blk: {
-            // check if this item is already present in mainOps
-            // this is pretty inefficient, we need to search all the remaining elements for
-            // a (payload) matching one, then check if the dep is correct.
-            for (mainoSlice.items(.payload)[imo..]) |item, relIdx| {
-                const idx = imo + relIdx;
-                try assert(idx < mainoSlice.len);
-                if (hashSingle(item) == toAddHash) {
-                    // check dep
-                    const flb = idx - mainoSlice.items(.deps)[idx];
-                    switch (std.math.order(flb, nlb)) {
-                        // item found
-                        .eq => break :blk idx,
-                        // item not found
-                        .lt => {
-                            // this is always the case, because otherwise our $dep is incorrect
-                            assert(clsOffset < flb);
-                            // just assume this also suffices (e.g. event-requires-any-of)
-                            break :blk idx;
-                        },
-                        // if (flb > nlb) then we won't ever hit an item
-                        // with same payload and lower $dep;
-                        // insertion would also fail.
-                        .gt => return false,
+            if (clsOffset >= toMergeOps.len) return true;
+
+            // calculate real offset (such that all deps still resolve)
+            const tmoPayloads = tmoSlice.items(.payload);
+            const tmoDeps = tmoSlice.items(.dep);
+            const realClsOffset = blk: {
+                var offset = clsOffset;
+                for (tmoDeps[clsOffset..]) |dep, idx| {
+                    const realDep = clsOffset + idx - dep;
+                    if (offset > realDep)
+                        offset = realDep;
+                }
+                break :blk offset;
+            };
+
+            // calculate new initial value
+            var initialValue2 = initialValue.clone(self.allocator);
+            defer initialValue2.deinit(self.allocator);
+            for (mainoSlice.items(.payload)[0..realClsOffset]) |item|
+                item.run(self.allocator, &initialValue2);
+
+            // check rest
+            var trList = std.ArrayList(usize).initCapacity(self.allocator, tmoSlice.len);
+            defer trList.deinit();
+            var itm = clsOffset;
+            var imo = clsOffset;
+            while (itm < tmoSlice.len) : (itm += 1) {
+                // translate lower bound
+                const nlb = if (tmoDeps[itm] == 0) imo else trList.items[itm - tmoDeps[itm]];
+
+                // check if this item is already present in self.ops
+                const toAdd = tmoPayloads[itm];
+                const toAddHash = hashSingle(toAdd);
+                const newIdx: usize = blk: {
+                    // check if this item is already present in self.ops
+                    // this is pretty inefficient, we need to search all the remaining elements for
+                    // a (payload) matching one, then check if the dep is correct.
+                    for (mainoSlice.items(.payload)[imo..]) |item, relIdx| {
+                        const idx = imo + relIdx;
+                        try assert(idx < mainoSlice.len);
+                        if (hashSingle(item) == toAddHash) {
+                            // check dep
+                            const flb = idx - mainoSlice.items(.deps)[idx];
+                            switch (std.math.order(flb, nlb)) {
+                                // item found
+                                .eq => break :blk idx,
+                                // item not found
+                                .lt => {
+                                    // this is always the case, because otherwise our $dep is incorrect
+                                    assert(clsOffset < flb);
+                                    // just assume this also suffices (e.g. event-requires-any-of)
+                                    break :blk idx;
+                                },
+                                // if (flb > nlb) then we won't ever hit an item
+                                // with same payload and lower $dep;
+                                // insertion would also fail.
+                                .gt => return false,
+                            }
+                        }
                     }
+
+                    // not present
+                    const tmp = self.insert(
+                        initialValue2,
+                        // we clone the value here because it's easier than trying
+                        // to keep track of which payloads were reused and which weren't.
+                        try toAdd.clone(self.allocator),
+                        realClsOffset,
+                        nlb,
+                    ) catch |err| switch (err) {
+                        error.LowerBoundMismatches => return false,
+                        else => return err,
+                    };
+                    mainoSlice = self.ops.slice();
+                    break :blk tmp;
+                };
+                imo = newIdx + 1;
+                trList.addOneAssumeCapacity().* = newIdx;
+            }
+            return true;
+        }
+
+        /// Removes no-ops from an oplist; this might make some future merges impossible.
+        pub fn pruneNoops(
+            self: *Self,
+            initialValue: FlowData,
+        ) !void {
+            const ops = &self.ops;
+            // 1. find no-ops
+            var nopl = std.DynamicBitSet.initEmpty(self.allocator, ops.len);
+            defer nopl.deinit();
+            const opsSlice = ops.slice();
+            {
+                var val = try initialValue.clone(self.allocator);
+                defer val.deinit(self.allocator);
+                var valh = hashSingle(val);
+                for (opsSlice.items(.payload)) |payload, idx| {
+                    try payload.run(self.allocator, &val);
+                    const newh = hashSingle(val);
+                    if (newh == valh) nopl.set(idx);
+                    valh = newh;
                 }
             }
-
-            // not present
-            break :blk insert(
-                FlowData,
-                Payload,
-                allocator,
-                initialValue2,
-                mainOps,
-                toAdd,
-                realClsOffset,
-                nlb,
-            ) catch |err| switch (err) {
-                error.LowerBoundMismatches => return false,
-                else => return err,
-            };
-        };
-        imo = newIdx + 1;
-        trList.addOneAssumeCapacity().* = newIdx;
-    }
-    return true;
-}
-
-/// Removes no-ops from an oplist; this might make some future merges impossible.
-pub fn pruneNoops(
-    comptime FlowData: type,
-    comptime Payload: type,
-    allocator: Allocator,
-    initialValue: FlowData,
-    ops: *std.MultiArrayList(Item(Payload)),
-) !void {
-    // 1. find no-ops
-    var nopl = std.DynamicBitSet.initEmpty(allocator, ops.len);
-    defer nopl.deinit();
-    const opsSlice = ops.slice();
-    {
-        var val = try initialValue.clone(allocator);
-        defer val.deinit(allocator);
-        var valh = hashSingle(val);
-        for (opsSlice.items(.payload)) |payload, idx| {
-            try payload.run(allocator, &val);
-            const newh = hashSingle(val);
-            if (newh == valh) nopl.set(idx);
-            valh = newh;
-        }
-    }
-    const nopcnt = nopl.count();
-    if (nopcnt == 0) {
-        return;
-    } else if (nopcnt == ops.len) {
-        ops.shrinkAndFree(allocator, 0);
-        return;
-    }
-    nopl.toggleAll();
-
-    // 2. prune no-ops
-    var tmpops = std.MultiArrayList(Item(Payload)){};
-    errdefer tmpops.deinit(allocator);
-    try tmpops.ensureUnunsedCapacity(allocator, ops.len - nopcnt);
-    const origOpPayloads = opsSlice.items(.payload);
-    const origOpDeps = opsSlice.items(.dep);
-    nopl.toggleAll();
-    var iter = nopl.iterator();
-    while (iter.next()) |idx| {
-        // this loop iterates over all non-noop items
-        var item: Item(Payload) = .{
-            .payload = origOpPayloads[idx],
-            .dep = origOpDeps[idx],
-        };
-        if (item.dep == 0) {
-            // nothing to do
-        } else if (nopl.isSet(idx - item.dep)) {
-            // recalculate $dep
-            const lowerBound = try determineInsertLowerBound(
-                FlowData,
-                Payload,
-                allocator,
-                initialValue,
-                tmpops.items(.payload),
-                item.payload,
-            );
-            item.dep = if (lowerBound == 0) 0 else @intCast(u32, 1 + idx - lowerBound);
-        } else {
-            // adjust $dep such that pruned items aren't counted
-            var i = idx - item.dep;
-            while (i < idx) : (i += 1) {
-                if (nopl.isSet(i))
-                    item.dep -= 1;
+            const nopcnt = nopl.count();
+            if (nopcnt == 0) {
+                return;
+            } else if (nopcnt == ops.len) {
+                ops.shrinkAndFree(self.allocator, 0);
+                return;
             }
-        }
-        tmpops.appendAssumeCapacity(item);
-    }
+            nopl.toggleAll();
 
-    // 3. finish reorg
-    ops.deinit(allocator);
-    ops.* = tmpops;
+            // 2. prune no-ops
+            var tmpops = std.MultiArrayList(Item(Payload)){};
+            errdefer tmpops.deinit(self.allocator);
+            try tmpops.ensureUnunsedCapacity(self.allocator, ops.len - nopcnt);
+            const origOpPayloads = opsSlice.items(.payload);
+            const origOpDeps = opsSlice.items(.dep);
+            nopl.toggleAll();
+            var iter = nopl.iterator();
+            while (iter.next()) |idx| {
+                // this loop iterates over all non-noop items
+                var item: Item(Payload) = .{
+                    .payload = origOpPayloads[idx],
+                    .dep = origOpDeps[idx],
+                };
+                if (item.dep == 0) {
+                    // nothing to do
+                } else if (!nopl.isSet(idx - item.dep)) {
+                    // recalculate $dep
+                    const lowerBound = try determineInsertLowerBound(
+                        FlowData,
+                        Payload,
+                        self.allocator,
+                        initialValue,
+                        tmpops.items(.payload),
+                        item.payload,
+                    );
+                    item.dep = if (lowerBound == 0) 0 else @intCast(u32, 1 + idx - lowerBound);
+                } else {
+                    // adjust $dep such that pruned items aren't counted
+                    var i = idx - item.dep;
+                    while (i < idx) : (i += 1) {
+                        if (!nopl.isSet(i))
+                            item.dep -= 1;
+                    }
+                }
+                tmpops.appendAssumeCapacity(item);
+            }
+
+            // 3. finish reorg
+            for (origOpPayloads) |*pl, idx| if (!nopl.isSet(idx)) pl.deinit(self.allocator);
+            ops.deinit(self.allocator);
+            ops.* = tmpops;
+        }
+    };
 }
