@@ -3,6 +3,10 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const testing = std.testing;
 
+test {
+    _ = @import("test.zig");
+}
+
 pub fn Item(comptime Payload: type) type {
     return struct {
         // backreference to the previous item in the list which
@@ -57,18 +61,18 @@ fn determineInsertLowerBound(
     var flowDataWithTa: FlowData = try initialValue.clone(allocator);
     defer flowDataWithTa.deinit(allocator);
 
-    try toAdd.run(&flowDataWithTa);
+    try toAdd.run(allocator, &flowDataWithTa);
 
     for (payloads) |item, idx| {
         // 1. prev-ops | item | toAdd
-        try item.run(&flowData);
+        try item.run(allocator, &flowData);
         var flowDataOne: FlowData = try flowData.clone(allocator);
         errdefer flowDataOne.deinit(allocator);
-        try toAdd.run(&flowDataOne);
+        try toAdd.run(allocator, &flowDataOne);
         // flowDataOne is the next flowDataWithTa
 
         // 2. prev-ops | toAdd | item
-        try item.run(&flowDataWithTa);
+        try item.run(allocator, &flowDataWithTa);
 
         // compare
         if (!FlowData.eql(&flowDataOne, &flowDataWithTa)) {
@@ -147,7 +151,7 @@ pub fn insert(
 
     // the operation payload, describes how the operation is executed
     // expected methods:
-    //   - run(self: *@This(), data: *FlowData) !void
+    //   - run(self: *@This(), allocator: Allocator, data: *FlowData) !void
     //   - hash(self: *@This(), hasher: anytype) void
     comptime Payload: type,
     allocator: Allocator,
@@ -236,7 +240,7 @@ pub fn merge(
     const mainoSlice = mainOps.slice();
     var initialValue2 = initialValue.clone(allocator);
     defer initialValue2.deinit(allocator);
-    for (mainoSlice.items(.payload)[0..realClsOffset]) |item| item.run(&initialValue2);
+    for (mainoSlice.items(.payload)[0..realClsOffset]) |item| item.run(allocator, &initialValue2);
 
     // check rest
     var trList = std.ArrayList(usize).initCapacity(allocator, tmoSlice.len);
@@ -259,10 +263,22 @@ pub fn merge(
                 try assert(idx < mainoSlice.len);
                 if (hashSingle(item) == toAddHash) {
                     // check dep
-                    if (idx - mainoSlice.items(.deps)[idx] != nlb)
-                        return false;
-                    // item found
-                    break :blk idx;
+                    const flb = idx - mainoSlice.items(.deps)[idx];
+                    switch (std.math.order(flb, nlb)) {
+                        // item found
+                        .eq => break :blk idx,
+                        // item not found
+                        .lt => {
+                            // this is always the case, because otherwise our $dep is incorrect
+                            assert(clsOffset < flb);
+                            // just assume this also suffices (e.g. event-requires-any-of)
+                            break :blk idx;
+                        },
+                        // if (flb > nlb) then we won't ever hit an item
+                        // with same payload and lower $dep;
+                        // insertion would also fail.
+                        .gt => return false,
+                    }
                 }
             }
 
@@ -287,27 +303,70 @@ pub fn merge(
     return true;
 }
 
-test "simple" {
-    const FlowData = PlainOldFlowData(bool);
-    const Payload = struct {
-        invert: bool,
-
-        const Payload = @This();
-
-        pub fn run(self: *const Payload, dat: *FlowData) !void {
-            if (self.invert)
-                dat.*.inner = !dat.*.inner;
+/// Removes no-ops from an oplist; this might make some future merges impossible.
+pub fn pruneNoops(
+    comptime FlowData: type,
+    comptime Payload: type,
+    allocator: Allocator,
+    initialValue: FlowData,
+    ops: *std.MultiArrayList(Item(Payload)),
+) !void {
+    // 1. find no-ops
+    var nopl = std.DynamicBitSet.initEmpty(allocator, ops.len);
+    defer nopl.deinit();
+    const opsSlice = ops.slice();
+    {
+        var val = try initialValue.clone(allocator);
+        defer val.deinit(allocator);
+        var valh = hashSingle(val);
+        for (opsSlice.items(.payload)) |payload, idx| {
+            try payload.run(allocator, &val);
+            const newh = hashSingle(val);
+            if (newh == valh) nopl.set(idx);
+            valh = newh;
         }
+    }
+    const nopcnt = nopl.count();
+    if (nopcnt == 0) {
+        return;
+    } else if (nopcnt == ops.len) {
+        ops.shrinkAndFree(allocator, 0);
+        return;
+    }
+    nopl.toggleAll();
 
-        pub fn hash(self: *const Payload, hasher: anytype) void {
-            std.hash.autoHash(hasher, self.*);
+    // 2. prune no-ops
+    var tmpops = std.MultiArrayList(Item(Payload)){};
+    errdefer tmpops.deinit(allocator);
+    try tmpops.ensureUnunsedCapacity(allocator, ops.len - nopcnt);
+    const origOpPayloads = opsSlice.items(.payload);
+    const origOpDeps = opsSlice.items(.dep);
+    nopl.toggleAll();
+    var iter = nopl.iterator();
+    while (iter.next()) |idx| {
+        // this loop iterates over all non-noop items
+        var item: Item(Payload) = .{
+            .payload = origOpPayloads[idx],
+            .dep = origOpDeps[idx],
+        };
+        if (item.dep == 0) {
+            // nothing to do
+        } else if (nopl.isSet(idx - item.dep)) {
+            // recalculate $dep
+            const lowerBound = try determineInsertLowerBound(FlowData, Payload, allocator, initialValue, tmpops.items(.payload), item.payload);
+            item.dep = if (lowerBound == 0) 0 else @intCast(u32, 1 + idx - lowerBound);
+        } else {
+            // adjust $dep such that pruned items aren't counted
+            var i = idx - item.dep;
+            while (i < idx) : (i += 1) {
+                if (nopl.isSet(i))
+                    item.dep -= 1;
+            }
         }
-    };
-    var xs = std.MultiArrayList(Item(Payload)){};
-    defer xs.deinit(testing.allocator);
+        tmpops.appendAssumeCapacity(item);
+    }
 
-    const ir0 = try insert(FlowData, Payload, testing.allocator, .{ .inner = false }, &xs, .{ .invert = true }, 0, 0);
-    try testing.expectEqual(@as(usize, 0), ir0);
-    const ir1 = try insert(FlowData, Payload, testing.allocator, .{ .inner = true }, &xs, .{ .invert = true }, 0, 0);
-    try testing.expectEqual(@as(usize, 0), ir1);
+    // 3. finish reorg
+    ops.deinit(allocator);
+    ops.* = tmpops;
 }
