@@ -175,7 +175,14 @@ pub fn insert(
     expectLowerBound: ?usize,
 ) !usize {
     var opsSlice = ops.slice();
-    const lowerBound = offset + try determineInsertLowerBound(FlowData, Payload, allocator, initialValue, opsSlice.items(.payload)[offset..], toAdd);
+    const lowerBound = offset + try determineInsertLowerBound(
+        FlowData,
+        Payload,
+        allocator,
+        initialValue,
+        opsSlice.items(.payload)[offset..],
+        toAdd,
+    );
     if (expectLowerBound) |elb| {
         if (lowerBound != elb) return error.LowerBoundMismatches;
     }
@@ -240,7 +247,8 @@ pub fn merge(
     const mainoSlice = mainOps.slice();
     var initialValue2 = initialValue.clone(allocator);
     defer initialValue2.deinit(allocator);
-    for (mainoSlice.items(.payload)[0..realClsOffset]) |item| item.run(allocator, &initialValue2);
+    for (mainoSlice.items(.payload)[0..realClsOffset]) |item|
+        item.run(allocator, &initialValue2);
 
     // check rest
     var trList = std.ArrayList(usize).initCapacity(allocator, tmoSlice.len);
@@ -353,7 +361,14 @@ pub fn pruneNoops(
             // nothing to do
         } else if (nopl.isSet(idx - item.dep)) {
             // recalculate $dep
-            const lowerBound = try determineInsertLowerBound(FlowData, Payload, allocator, initialValue, tmpops.items(.payload), item.payload);
+            const lowerBound = try determineInsertLowerBound(
+                FlowData,
+                Payload,
+                allocator,
+                initialValue,
+                tmpops.items(.payload),
+                item.payload,
+            );
             item.dep = if (lowerBound == 0) 0 else @intCast(u32, 1 + idx - lowerBound);
         } else {
             // adjust $dep such that pruned items aren't counted
