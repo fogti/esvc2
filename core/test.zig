@@ -71,4 +71,32 @@ test "i32" {
     try testing.expectEqual(@as(usize, 4), try xs.insert(initval, .{ .add = -1 }, 0, 4));
     try testing.expectEqual(@as(usize, 5), try xs.insert(initval, .{ .add = -1 }, 0, 4));
     try testing.expectEqual(@as(usize, 4), try xs.insert(initval, .{ .add = -2 }, 0, 4));
+    std.debug.print("[1] Tdeps: {any}\nTpayloads: {any}\n", .{ xs.ops.items(.dep), xs.ops.items(.payload) });
+
+    var xs2 = I32Esvc { .allocator = xs.allocator };
+    {
+        errdefer xs2.deinit();
+
+        // populate xs2 with .{ +1, *2, +5, *4 }
+        {
+            var i: usize = 0;
+            while (i < 4) : (i += 1) {
+                try xs2.ops.append(testing.allocator, xs.ops.get(i));
+            }
+        }
+
+        try testing.expectEqual(@as(usize, 4), try xs2.insert(initval, .{ .add = 0 }, 0, 0));
+        try testing.expectEqual(@as(usize, 4), try xs2.insert(initval, .{ .add = 1 }, 0, 4));
+        //try testing.expectEqual(@as(usize, 5), try xs2.insert(initval, .{ .mul = 2 }, 0, 5));
+        try testing.expectEqual(@as(usize, 5), try xs2.insert(initval, .{ .add = 5 }, 0, 4));
+        //try testing.expectEqual(@as(usize, 6), try xs2.insert(initval, .{ .mul = 4 }, 0, 6));
+        try testing.expectEqual(@as(usize, 6), try xs2.insert(initval, .{ .add = -1 }, 0, 4));
+        try testing.expectEqual(@as(usize, 7), try xs2.insert(initval, .{ .add = -1 }, 0, 4));
+        try testing.expectEqual(@as(usize, 6), try xs2.insert(initval, .{ .add = -2 }, 0, 4));
+    }
+
+    // try to merge them.
+    std.debug.print("[2] Tdeps: {any}\nTpayloads: {any}\n", .{ xs2.ops.items(.dep), xs2.ops.items(.payload) });
+    try testing.expectEqual(true, try xs.merge(initval, &xs2.ops));
+    std.debug.print("[R] Tdeps: {any}\nTpayloads: {any}\n", .{ xs.ops.items(.dep), xs.ops.items(.payload) });
 }

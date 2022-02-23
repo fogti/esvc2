@@ -199,7 +199,10 @@ pub fn Esvc(
                 toAdd,
             );
             if (expectLowerBound) |elb| {
-                if (lowerBound != elb) return error.LowerBoundMismatches;
+                if (lowerBound != elb) {
+                    std.testing.expectEqual(elb, lowerBound) catch {};
+                    return error.LowerBoundMismatches;
+                }
             }
             const upperBound = determineInsertUpperBound(Payload, opsSlice, lowerBound, toAdd);
             assert(lowerBound <= upperBound);
@@ -226,11 +229,12 @@ pub fn Esvc(
             self: *Self,
             initialValue: FlowData,
             // this function does take ownership of toMergeOps
-            toMergeOps: Ops,
+            toMergeOps: *Ops,
         ) !bool {
             defer {
                 for (toMergeOps.items(.payload)) |*pl| pl.deinit(self.allocator);
                 toMergeOps.deinit(self.allocator);
+                toMergeOps.* = .{};
             }
 
             const tmoSlice = toMergeOps.slice();
@@ -270,47 +274,85 @@ pub fn Esvc(
             };
 
             // calculate new initial value
-            var initialValue2 = initialValue.clone(self.allocator);
+            var initialValue2 = try initialValue.clone(self.allocator);
             defer initialValue2.deinit(self.allocator);
             for (mainoSlice.items(.payload)[0..realClsOffset]) |item|
-                item.run(self.allocator, &initialValue2);
+                try item.run(self.allocator, &initialValue2);
 
             // check rest
-            var trList = std.ArrayList(usize).initCapacity(self.allocator, tmoSlice.len);
+            var trList = try std.ArrayList(usize).initCapacity(self.allocator, tmoSlice.len);
             defer trList.deinit();
             var itm = clsOffset;
             var imo = clsOffset;
+            {
+                var i: usize = 0;
+                while (i < clsOffset) : (i += 1) {
+                    trList.addOneAssumeCapacity().* = i;
+                }
+            }
             while (itm < tmoSlice.len) : (itm += 1) {
                 // translate lower bound
-                const nlb = if (tmoDeps[itm] == 0) imo else trList.items[itm - tmoDeps[itm]];
+                if (trList.items.len != itm) {
+                    std.debug.print("Esvc.merge: trList length = {d}, imo = {d}\n", .{trList.items.len, imo});
+                    @panic("trList not filled correctly");
+                }
+                //std.debug.print("Esvc.merge: itm = {d}; imo = {d}\n", .{ itm, imo });
+                const nlb = if (tmoDeps[itm] == 0) imo else trList.items[itm - tmoDeps[itm]] + 1;
 
                 // check if this item is already present in self.ops
                 const toAdd = tmoPayloads[itm];
                 const toAddHash = hashSingle(toAdd);
+                //std.debug.print("\tnlb = {d}; payload = {any}; plh = {x}\n", .{
+                //    nlb,
+                //    toAdd,
+                //    toAddHash,
+                //});
+                //std.debug.print("[M] Tdeps: {any}\n[M] Tpayloads: {any}\n", .{
+                //    mainoSlice.items(.dep),
+                //    mainoSlice.items(.payload),
+                //});
                 const newIdx: usize = blk: {
                     // check if this item is already present in self.ops
                     // this is pretty inefficient, we need to search all the remaining elements for
                     // a (payload) matching one, then check if the dep is correct.
                     for (mainoSlice.items(.payload)[imo..]) |item, relIdx| {
                         const idx = imo + relIdx;
-                        try assert(idx < mainoSlice.len);
+                        assert(idx < mainoSlice.len);
                         if (hashSingle(item) == toAddHash) {
                             // check dep
-                            const flb = idx - mainoSlice.items(.deps)[idx];
+                            const oidep = mainoSlice.items(.dep)[idx];
+                            const flb = if (oidep == 0) imo else idx - oidep;
                             switch (std.math.order(flb, nlb)) {
                                 // item found
                                 .eq => break :blk idx,
                                 // item not found
                                 .lt => {
                                     // this is always the case, because otherwise our $dep is incorrect
-                                    assert(clsOffset < flb);
-                                    // just assume this also suffices (e.g. event-requires-any-of)
-                                    break :blk idx;
+                                    if(realClsOffset <= flb) {
+                                        // just assume this also suffices (e.g. event-requires-any-of)
+                                        break :blk idx;
+                                    } else {
+                                        // dep is incorrect
+                                        std.debug.print("Esvc.merge: realClsOffset = {d}; clsOffset = {d}; idx = {d}; flb = {d}\n", .{
+                                            realClsOffset,
+                                            clsOffset,
+                                            idx,
+                                            flb,
+                                        });
+                                        unreachable;
+                                    }
                                 },
                                 // if (flb > nlb) then we won't ever hit an item
                                 // with same payload and lower $dep;
                                 // insertion would also fail.
-                                .gt => return false,
+                                .gt => {
+                                    std.debug.print("Esvc.merge: idx = {d}; flb = {d}; nlb = {d}\n", .{
+                                        idx,
+                                        flb,
+                                        nlb,
+                                    });
+                                    return false;
+                                },
                             }
                         }
                     }
@@ -324,7 +366,14 @@ pub fn Esvc(
                         realClsOffset,
                         nlb,
                     ) catch |err| switch (err) {
-                        error.LowerBoundMismatches => return false,
+                        error.LowerBoundMismatches => {
+                            std.debug.print("esvc.Esvc.merge: LowerBoundMismatches @ tmo item {d}: {any}; trList = {any}\n", .{
+                                itm,
+                                toAdd,
+                                trList.items,
+                            });
+                            return false;
+                        },
                         else => return err,
                     };
                     mainoSlice = self.ops.slice();
@@ -332,6 +381,7 @@ pub fn Esvc(
                 };
                 imo = newIdx + 1;
                 trList.addOneAssumeCapacity().* = newIdx;
+                //std.debug.print("\n", .{});
             }
             return true;
         }
