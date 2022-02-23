@@ -15,7 +15,7 @@ pub fn Item(comptime Payload: type) type {
         // value 0 means "no dependency"
         // assuming the current item has index i,
         // value dep references item at position (i - dep)
-        dep: u32,
+        dep: u32 = 0,
 
         payload: Payload,
     };
@@ -148,7 +148,7 @@ pub fn Esvc(
     //   - deinit(self: *@This(), allocator: Allocator) void
     //   - clone(self: *const @This(), allocator: Allocator) !@This()
     //   - eql(a: *const @This(), b: *const @This()) bool
-    comptime FlowData: type,
+    comptime FlowData_: type,
 
     // the operation payload, describes how the operation is executed
     // expected methods:
@@ -156,13 +156,15 @@ pub fn Esvc(
     //   - clone(self: *const @This(), allocator: Allocator) !@This()
     //   - run(self: *@This(), allocator: Allocator, data: *FlowData) !void
     //   - hash(self: *@This(), hasher: anytype) void
-    comptime Payload: type,
+    comptime Payload_: type,
 ) type {
     return struct {
         allocator: Allocator,
-        ops: Ops,
+        ops: Ops = .{},
 
         const Self = @This();
+        pub const FlowData = FlowData_;
+        pub const Payload = Payload_;
         pub const Ops = std.MultiArrayList(Item(Payload));
 
         pub fn deinit(self: *Self) void {
