@@ -1,3 +1,5 @@
+proof/*.aux
+proof/*.glob
 result
 result-*
 zig-cache
