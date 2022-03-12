@@ -7,15 +7,18 @@ test {
     _ = @import("test.zig");
 }
 
+pub const RelativeDep = struct {
+    // value 0 means "no dependency"
+    // otherwise assuming the associated item has index i
+    // value $dep=.value references item at position (i - $dep=.value)
+    value: u32,
+};
+
 pub fn Item(comptime Payload: type) type {
     return struct {
         // backreference to the previous item in the list which
         // is non-commutative with this one.
-        //
-        // value 0 means "no dependency"
-        // assuming the current item has index i,
-        // value dep references item at position (i - dep)
-        dep: u32 = 0,
+        dep: RelativeDep = .{ .value = 0 },
 
         payload: Payload,
     };
@@ -40,19 +43,24 @@ pub fn PlainOldFlowData(comptime Inner: type) type {
 }
 
 // lower bound conversion functions
-fn lowerBoundAbs(lb: usize, pos: usize) ?usize {
-    return if (lb == 0) null else (pos - lb);
+fn lowerBoundAbs(lb: RelativeDep, pos: usize) ?usize {
+    return if (lb.value == 0) null else (pos - @intCast(usize, lb.value));
 }
-fn lowerBoundRel(lba: ?usize, pos: usize) usize {
-    return if (lba) |lba2| (pos - lba2) else 0;
+fn lowerBoundRel(lba: ?usize, pos: usize) RelativeDep {
+    return .{ .value = @intCast(u32, if (lba) |lba2| (pos - lba2) else 0) };
 }
 
 test "lower bound conv" {
-    try testing.expectEqual(@as(?usize, null), lowerBoundAbs(0, 100));
-    try testing.expectEqual(@as(usize, 0), lowerBoundRel(lowerBoundAbs(0, 5), 5));
-    try testing.expectEqual(@as(usize, 0), lowerBoundRel(lowerBoundAbs(0, 100), 100));
-    try testing.expectEqual(@as(usize, 20), lowerBoundRel(lowerBoundAbs(20, 100), 100));
-    try testing.expectEqual(@as(usize, 30), lowerBoundRel(lowerBoundAbs(30, 150), 150));
+    try testing.expectEqual(@as(?usize, null), lowerBoundAbs(.{ .value = 0 }, 100));
+
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) {
+        var j: usize = @intCast(usize, i);
+        while (j < 100) : (j += 1) {
+            const x = RelativeDep{ .value = i };
+            try testing.expectEqual(x, lowerBoundRel(lowerBoundAbs(x, j), j));
+        }
+    }
 }
 
 const InsertLowerBound = struct {
@@ -67,7 +75,7 @@ const InsertLowerBound = struct {
     }
 
     /// converts an ILB value to a relative `dep` value
-    pub fn toRelative(self: Self, offset: usize, position: usize) usize {
+    pub fn toRelative(self: Self, offset: usize, position: usize) RelativeDep {
         assert(offset <= position);
         return lowerBoundRel(self.toAbsolute(offset), position);
     }
@@ -81,13 +89,18 @@ test "InsertLowerBound toAbsolute" {
 }
 
 test "InsertLowerBound toRelative" {
-    try testing.expectEqual(@as(usize, 0), (InsertLowerBound{ .value = 0 }).toRelative(0, 0));
-    try testing.expectEqual(@as(usize, 0), (InsertLowerBound{ .value = 0 }).toRelative(0, 1));
-    try testing.expectEqual(@as(usize, 1), (InsertLowerBound{ .value = 1 }).toRelative(0, 1));
-    try testing.expectEqual(@as(usize, 2), (InsertLowerBound{ .value = 1 }).toRelative(0, 2));
-    try testing.expectEqual(@as(usize, 1), (InsertLowerBound{ .value = 2 }).toRelative(0, 2));
-    try testing.expectEqual(@as(usize, 1), (InsertLowerBound{ .value = 2 }).toRelative(5, 7));
-    try testing.expectEqual(@as(usize, 14), (InsertLowerBound{ .value = 5 }).toRelative(5, 23));
+    const S = struct {
+        pub fn roundTrip(rd: u32, ilb: usize, offset: usize, pos: usize) !void {
+            try testing.expectEqual(RelativeDep{ .value = rd }, (InsertLowerBound{ .value = ilb }).toRelative(offset, pos));
+        }
+    };
+    try S.roundTrip(0, 0, 0, 0);
+    try S.roundTrip(0, 0, 0, 1);
+    try S.roundTrip(1, 1, 0, 1);
+    try S.roundTrip(2, 1, 0, 2);
+    try S.roundTrip(1, 2, 0, 2);
+    try S.roundTrip(1, 2, 5, 7);
+    try S.roundTrip(14, 5, 5, 23);
 }
 
 fn determineInsertLowerBound(
@@ -152,7 +165,7 @@ fn hashOperation(
     const deps = ops.items(.dep);
     while (true) {
         payloads[i].hash(&hasher_);
-        const dep = deps[i];
+        const dep = deps[i].value;
         if (dep == 0) break;
         i -= dep;
     }
@@ -248,7 +261,7 @@ pub fn Esvc(
 
             // upperBound returns the index where we want to insert our element
             try self.ops.insert(self.allocator, upperBound, .{
-                .dep = @intCast(u32, lowerBound.toRelative(offset, upperBound)),
+                .dep = lowerBound.toRelative(offset, upperBound),
                 .payload = toAdd,
             });
             opsSlice = self.ops.slice();
@@ -257,8 +270,8 @@ pub fn Esvc(
             for (opsSlice.items(.dep)[upperBound + 1 ..]) |*item, idx| {
                 const realIdx = upperBound + 1 + idx;
                 assert(opsSlice.len > realIdx);
-                if (item.* > idx) item.* += 1;
-                assert(realIdx >= item.*);
+                if (item.*.value > idx) item.*.value += 1;
+                assert(realIdx >= item.*.value);
             }
             return upperBound;
         }
@@ -316,7 +329,7 @@ pub fn Esvc(
                     if (hashSingle(mainPayloads[offset]) != hashSingle(tmoPayloads[offset]))
                         break;
                     // if this fails, the data is corrupted
-                    if (tmoDeps[offset] != mainDeps[offset])
+                    if (tmoDeps[offset].value != mainDeps[offset].value)
                         unreachable;
                 }
                 break :blk offset;
