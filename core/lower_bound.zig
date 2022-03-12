@@ -7,6 +7,15 @@ pub const RelativeDep = struct {
     // otherwise assuming the associated item has index i
     // value $dep=.value references item at position (i - $dep=.value)
     value: u32,
+
+    pub fn format(
+        self: @This(),
+        comptime actual_fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
+        try std.fmt.formatType(self.value, actual_fmt, options, writer, 1);
+    }
 };
 
 // conversion functions
