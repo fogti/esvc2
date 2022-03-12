@@ -2,23 +2,17 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const testing = std.testing;
+const lb = @import("lower_bound.zig");
 
 test {
     _ = @import("test.zig");
 }
 
-pub const RelativeDep = struct {
-    // value 0 means "no dependency"
-    // otherwise assuming the associated item has index i
-    // value $dep=.value references item at position (i - $dep=.value)
-    value: u32,
-};
-
 pub fn Item(comptime Payload: type) type {
     return struct {
         // backreference to the previous item in the list which
         // is non-commutative with this one.
-        dep: RelativeDep = .{ .value = 0 },
+        dep: lb.RelativeDep = .{ .value = 0 },
 
         payload: Payload,
     };
@@ -42,67 +36,6 @@ pub fn PlainOldFlowData(comptime Inner: type) type {
     };
 }
 
-// lower bound conversion functions
-fn lowerBoundAbs(lb: RelativeDep, pos: usize) ?usize {
-    return if (lb.value == 0) null else (pos - @intCast(usize, lb.value));
-}
-fn lowerBoundRel(lba: ?usize, pos: usize) RelativeDep {
-    return .{ .value = @intCast(u32, if (lba) |lba2| (pos - lba2) else 0) };
-}
-
-test "lower bound conv" {
-    try testing.expectEqual(@as(?usize, null), lowerBoundAbs(.{ .value = 0 }, 100));
-
-    var i: u32 = 0;
-    while (i < 100) : (i += 1) {
-        var j: usize = @intCast(usize, i);
-        while (j < 100) : (j += 1) {
-            const x = RelativeDep{ .value = i };
-            try testing.expectEqual(x, lowerBoundRel(lowerBoundAbs(x, j), j));
-        }
-    }
-}
-
-const InsertLowerBound = struct {
-    value: usize,
-
-    const Self = @This();
-
-    /// converts an ILB value to an absolute index
-    pub fn toAbsolute(self: Self, offset: usize) ?usize {
-        const v = self.value;
-        return if (v == 0) null else (offset + v - 1);
-    }
-
-    /// converts an ILB value to a relative `dep` value
-    pub fn toRelative(self: Self, offset: usize, position: usize) RelativeDep {
-        assert(offset <= position);
-        return lowerBoundRel(self.toAbsolute(offset), position);
-    }
-};
-
-test "InsertLowerBound toAbsolute" {
-    try testing.expectEqual(@as(?usize, null), (InsertLowerBound{ .value = 0 }).toAbsolute(0));
-    try testing.expectEqual(@as(?usize, 0), (InsertLowerBound{ .value = 1 }).toAbsolute(0));
-    try testing.expectEqual(@as(?usize, 9), (InsertLowerBound{ .value = 5 }).toAbsolute(5));
-    try testing.expectEqual(@as(?usize, null), (InsertLowerBound{ .value = 0 }).toAbsolute(5));
-}
-
-test "InsertLowerBound toRelative" {
-    const S = struct {
-        pub fn roundTrip(rd: u32, ilb: usize, offset: usize, pos: usize) !void {
-            try testing.expectEqual(RelativeDep{ .value = rd }, (InsertLowerBound{ .value = ilb }).toRelative(offset, pos));
-        }
-    };
-    try S.roundTrip(0, 0, 0, 0);
-    try S.roundTrip(0, 0, 0, 1);
-    try S.roundTrip(1, 1, 0, 1);
-    try S.roundTrip(2, 1, 0, 2);
-    try S.roundTrip(1, 2, 0, 2);
-    try S.roundTrip(1, 2, 5, 7);
-    try S.roundTrip(14, 5, 5, 23);
-}
-
 fn determineInsertLowerBound(
     comptime FlowData: type,
     comptime Payload: type,
@@ -110,7 +43,7 @@ fn determineInsertLowerBound(
     initialValue: FlowData,
     payloads: []const Payload,
     toAdd: Payload,
-) !InsertLowerBound {
+) !lb.InsertLowerBound {
     // for simplicity and lower memory usage,
     // we iterate over the ops list in normal order, instead of in reverse.
     // also, we don't handle noop payloads different than others,
@@ -148,7 +81,7 @@ fn determineInsertLowerBound(
         flowDataWithTa = flowDataOne;
     }
 
-    return InsertLowerBound{
+    return lb.InsertLowerBound{
         .value = if (lastNonComm) |lnc| (lnc + 1) else @as(usize, 0),
     };
 }
@@ -183,7 +116,7 @@ fn hashSingle(op: anytype) u64 {
 fn determineInsertUpperBound(
     comptime Payload: type,
     ops: std.MultiArrayList(Item(Payload)).Slice,
-    lowerBound: InsertLowerBound,
+    lowerBound: lb.InsertLowerBound,
     toAdd: Payload,
     offset: usize,
 ) usize {
@@ -245,7 +178,7 @@ pub fn Esvc(
 
             // the operation which should be inserted
             toAdd: Payload,
-            lowerBound: InsertLowerBound,
+            lowerBound: lb.InsertLowerBound,
             offset: usize,
         ) !usize {
             var opsSlice = self.ops.slice();
@@ -343,7 +276,7 @@ pub fn Esvc(
             const realClsOffset = blk: {
                 var offset = clsOffset;
                 for (tmoDeps[clsOffset..]) |dep, idx| {
-                    const rd = lowerBoundAbs(dep, clsOffset + idx);
+                    const rd = lb.abs(dep, clsOffset + idx);
                     if (rd) |realDep| {
                         if (offset > realDep)
                             offset = realDep;
@@ -376,7 +309,7 @@ pub fn Esvc(
                     @panic("trList not filled correctly");
                 }
                 //std.debug.print("Esvc.merge: itm = {d}; imo = {d}\n", .{ itm, imo });
-                const nlb = if (lowerBoundAbs(tmoDeps[itm], itm)) |olb| trList.items[olb] else imo;
+                const nlb = if (lb.abs(tmoDeps[itm], itm)) |olb| trList.items[olb] else imo;
 
                 // check if this item is already present in self.ops
                 const toAdd = tmoPayloads[itm];
@@ -399,7 +332,7 @@ pub fn Esvc(
                         assert(idx < mainoSlice.len);
                         if (hashSingle(item) == toAddHash) {
                             // check dep
-                            const flb = lowerBoundAbs(mainoSlice.items(.dep)[idx], idx) orelse imo;
+                            const flb = lb.abs(mainoSlice.items(.dep)[idx], idx) orelse imo;
                             switch (std.math.order(flb, nlb)) {
                                 // item found
                                 .eq => break :blk idx,
@@ -536,25 +469,25 @@ pub fn Esvc(
                     .payload = origOpPayloads[idx],
                     .dep = origOpDeps[idx],
                 };
-                if (item.dep == 0) {
-                    // nothing to do
-                } else if (!nopl.isSet(idx - item.dep)) {
-                    // recalculate $dep
-                    const lowerBound = try determineInsertLowerBound(
-                        FlowData,
-                        Payload,
-                        self.allocator,
-                        initialValue,
-                        tmpops.items(.payload),
-                        item.payload,
-                    );
-                    item.dep = if (lowerBound == 0) 0 else @intCast(u32, 1 + idx - lowerBound);
-                } else {
-                    // adjust $dep such that pruned items aren't counted
-                    var i = idx - item.dep;
-                    while (i < idx) : (i += 1) {
-                        if (!nopl.isSet(i))
-                            item.dep -= 1;
+                if (lb.abs(item.dep, idx)) |deppos| {
+                    if (!nopl.isSet(deppos)) {
+                        // recalculate $dep
+                        const lowerBound = try determineInsertLowerBound(
+                            FlowData,
+                            Payload,
+                            self.allocator,
+                            initialValue,
+                            tmpops.items(.payload),
+                            item.payload,
+                        );
+                        item.dep = lowerBound.toRelative(0, idx);
+                    } else {
+                        // adjust $dep such that pruned items aren't counted
+                        var i = deppos;
+                        while (i < idx) : (i += 1) {
+                            if (!nopl.isSet(i))
+                                item.dep.value -= 1;
+                        }
                     }
                 }
                 tmpops.appendAssumeCapacity(item);
