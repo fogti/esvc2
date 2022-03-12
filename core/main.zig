@@ -333,58 +333,37 @@ pub fn Esvc(
                         if (hashSingle(item) == toAddHash) {
                             // check dep
                             const flb = lb.abs(mainoSlice.items(.dep)[idx], idx) orelse imo;
-                            switch (std.math.order(flb, nlb)) {
-                                // item found
-                                .eq => break :blk idx,
-                                // item not found
-                                .lt => {
-                                    // this is always the case, because otherwise our $dep is incorrect
-                                    if (realClsOffset <= flb) {
-                                        // just assume this also suffices (e.g. event-requires-any-of)
-                                        // make sure that the lower bound is still correct
-                                        const xlb = try determineInsertLowerBound(
-                                            FlowData,
-                                            Payload,
-                                            self.allocator,
-                                            initialValue2,
-                                            mainoSlice.items(.payload)[realClsOffset..idx],
-                                            mainoSlice.items(.payload)[idx],
-                                        );
-                                        if (flb != (xlb.toAbsolute(realClsOffset) orelse imo)) {
-                                            std.debug.print("Esvc.merge: realClsOffset = {d}; clsOffset = {d}; idx = {d}; flb = {d}; nlb = {d}; xlb = {d}\n", .{
-                                                realClsOffset,
-                                                clsOffset,
-                                                idx,
-                                                flb,
-                                                nlb,
-                                                xlb,
-                                            });
-                                            unreachable;
-                                        }
-                                        break :blk idx;
-                                    } else {
-                                        // dep is incorrect
-                                        std.debug.print("Esvc.merge: realClsOffset = {d}; clsOffset = {d}; idx = {d}; flb = {d}\n", .{
-                                            realClsOffset,
-                                            clsOffset,
-                                            idx,
-                                            flb,
-                                        });
-                                        unreachable;
-                                    }
-                                },
-                                // if (flb > nlb) then we won't ever hit an item
-                                // with same payload and lower $dep;
-                                // insertion would also fail.
-                                .gt => {
-                                    std.debug.print("Esvc.merge: idx = {d}; flb = {d}; nlb = {d}\n", .{
+                            // if exact match => item found
+                            if (flb != nlb) {
+                                // not an exact match, but maybe the old lastNonComm got
+                                // superseded by an earlier dependency (event-requires-any-of)
+                                const llb = std.math.min(flb, nlb);
+                                assert(realClsOffset <= llb);
+                                const xlb = try determineInsertLowerBound(
+                                    FlowData,
+                                    Payload,
+                                    self.allocator,
+                                    initialValue2,
+                                    mainoSlice.items(.payload)[realClsOffset..idx],
+                                    // this also catches some hash collisions
+                                    toAdd,
+                                );
+                                if (llb != (xlb.toAbsolute(realClsOffset) orelse imo)) {
+                                    // $dep is incorrect
+                                    std.debug.print("Esvc.merge: realClsOffset = {d}; clsOffset = {d}; idx = {d}; flb = {d}; nlb = {d}; xlb = {d}\n", .{
+                                        realClsOffset,
+                                        clsOffset,
                                         idx,
                                         flb,
                                         nlb,
+                                        xlb,
                                     });
                                     return false;
-                                },
+                                }
+                                // update $dep
+                                mainoSlice.items(.dep)[idx] = xlb.toRelative(realClsOffset, idx);
                             }
+                            break :blk idx;
                         }
                     }
 
