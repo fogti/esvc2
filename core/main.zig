@@ -33,10 +33,6 @@ pub fn PlainOldFlowData(comptime Inner: type) type {
         pub fn eql(a: *const Self, b: *const Self) bool {
             return a.*.inner == b.*.inner;
         }
-        // used for pruneNoops
-        pub fn hash(self: *const Self, hasher: anytype) void {
-            std.hash.autoHash(hasher, self.inner);
-        }
     };
 }
 
@@ -442,12 +438,11 @@ pub fn Esvc(
             {
                 var val = try initialValue.clone(self.allocator);
                 defer val.deinit(self.allocator);
-                var valh = hashSingle(val);
                 for (opsSlice.items(.payload)) |payload, idx| {
+                    var oldval = try val.clone(self.allocator);
+                    defer oldval.deinit(self.allocator);
                     try payload.run(self.allocator, &val);
-                    const newh = hashSingle(val);
-                    if (newh == valh) nopl.set(idx);
-                    valh = newh;
+                    if (FlowData.eql(&oldval, &val)) nopl.set(idx);
                 }
             }
             const nopcnt = nopl.count();
