@@ -108,4 +108,8 @@ test "i32" {
     std.debug.print("[2] Tdeps: {any}\nTpayloads: {any}\n", .{ xs2.ops.items(.dep), xs2.ops.items(.payload) });
     try testing.expectEqual(true, try xs.merge(initval, &xs2.ops));
     std.debug.print("[R] Tdeps: {any}\nTpayloads: {any}\n", .{ xs.ops.items(.dep), xs.ops.items(.payload) });
+
+    // try to prune noops
+    try xs.pruneNoops(initval);
+    std.debug.print("[P] Tdeps: {any}\nTpayloads: {any}\n", .{ xs.ops.items(.dep), xs.ops.items(.payload) });
 }

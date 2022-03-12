@@ -33,6 +33,10 @@ pub fn PlainOldFlowData(comptime Inner: type) type {
         pub fn eql(a: *const Self, b: *const Self) bool {
             return a.*.inner == b.*.inner;
         }
+        // used for pruneNoops
+        pub fn hash(self: *const Self, hasher: anytype) void {
+            std.hash.autoHash(hasher, self.inner);
+        }
     };
 }
 
@@ -432,7 +436,7 @@ pub fn Esvc(
         ) !void {
             const ops = &self.ops;
             // 1. find no-ops
-            var nopl = std.DynamicBitSet.initEmpty(self.allocator, ops.len);
+            var nopl = try std.DynamicBitSet.initEmpty(self.allocator, ops.len);
             defer nopl.deinit();
             const opsSlice = ops.slice();
             {
@@ -458,11 +462,10 @@ pub fn Esvc(
             // 2. prune no-ops
             var tmpops = std.MultiArrayList(Item(Payload)){};
             errdefer tmpops.deinit(self.allocator);
-            try tmpops.ensureUnunsedCapacity(self.allocator, ops.len - nopcnt);
+            try tmpops.ensureUnusedCapacity(self.allocator, ops.len - nopcnt);
             const origOpPayloads = opsSlice.items(.payload);
             const origOpDeps = opsSlice.items(.dep);
-            nopl.toggleAll();
-            var iter = nopl.iterator();
+            var iter = nopl.iterator(.{});
             while (iter.next()) |idx| {
                 // this loop iterates over all non-noop items
                 var item: Item(Payload) = .{
